@@ -1,0 +1,123 @@
+CLASS_NAMES: ['Vehicle', 'Pedestrian', 'Cyclist']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/custom_av_dataset.yaml
+
+    # POINT_CLOUD_RANGE: [-70.0, -70.0, -4.0, 70.0, 70.0, 4.0]
+    # DATA_PROCESSOR:
+    #     -   NAME: mask_points_and_boxes_outside_range
+    #         REMOVE_OUTSIDE_BOXES: True
+
+    #     -   NAME: shuffle_points
+    #         SHUFFLE_ENABLED: {
+    #             'train': True,
+    #             'test': True
+    #         }
+
+    #     -   NAME: transform_points_to_voxels
+    #         VOXEL_SIZE: [ 0.25, 0.25, 8.0 ]
+    #         MAX_POINTS_PER_VOXEL: 20
+    #         MAX_NUMBER_OF_VOXELS: {
+    #             'train': 150000,
+    #             'test': 150000
+    #         }
+MODEL:
+    NAME: VoxelNeXt
+
+    VFE:
+        NAME: MeanVFE
+
+    BACKBONE_3D:
+        NAME: VoxelResBackBone8xVoxelNeXt
+        SPCONV_KERNEL_SIZES: [5, 5, 3, 3]
+        OUT_CHANNEL: 320 #256
+        CHANNELS: [32, 64, 128, 256, 320] # 마지막 256
+
+    DENSE_HEAD:
+        NAME: VoxelNeXtHead
+        IOU_BRANCH: True
+        CLASS_AGNOSTIC: False
+        INPUT_FEATURES: 256
+
+        CLASS_NAMES_EACH_HEAD: [
+            ['Vehicle', 'Pedestrian', 'Cyclist']
+        ]
+
+        SHARED_CONV_CHANNEL: 320 #256
+        USE_BIAS_BEFORE_NORM: True
+        NUM_HM_CONV: 3 # 2 VoxelNext-K3에서 3x3으로 변형했는데 2퍼 상승됨
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+                'iou': {'out_channels': 1, 'num_conv': 2},
+            }
+        RECTIFIER: [0.68, 0.71, 0.65]
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 8
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1 # 0.1 -> 0.2 -> 0.1
+            MIN_RADIUS: 2 # 2 -> 3 -> 2
+
+        LOSS_CONFIG:
+            CLASS_LOSS_WEIGHTS: [1.0, 3.0, 2.5] # 2.0 1.7
+            # - Pedestrian/Cyclist의 long-tail 보정: 분류 히트맵 손실에 더 큰 가중
+            # - Vehicle은 충분히 자주 등장하므로 1.0 유지
+            # FOCAL_ALPHA: 0.25          # 클래스 불균형 완화(포컬 논문 기본값) 
+            # FOCAL_GAMMA: 2.0           # hard-example에 더 집중
+
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 2.0,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+        # LOSS_CONFIG:
+        #     LOSS_WEIGHTS: {
+        #       'cls_weight': 1.5,        # 1.0 → 1.5 : coarse grid에서 분류 신호 강화
+        #       'loc_weight': 1.5,        # 2.0 → 1.5 : 과도한 회귀 가중 완화(불안정성 감소)
+        #       # [cx, cy, cz, w, l, h, rot_sin, rot_cos] 가정
+        #       'code_weights': [0.75, 0.75, 1.0, 1.2, 1.2, 1.2, 1.1, 1.1]
+        #       # - center xy: 0.75로 약간 낮춤(양자화 한계 고려)
+        #       # - dim / rot: ↑ (IoU 개선에 직결, AP/APH 방어)
+        #     }
+        
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.15 # 0.1 -> 0.2~0.3
+            POST_CENTER_LIMIT_RANGE: [-75.2, -75.2, -2, 75.2, 75.2, 4]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: [0.65, 0.7, 0.7] #0.7
+                NMS_PRE_MAXSIZE: [2048, 1024, 1024] #[4096]
+                NMS_POST_MAXSIZE: [200, 150, 150] #500
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+
+        EVAL_METRIC: waymo
+
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 2
+    NUM_EPOCHS: 8
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.002 #0.003
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
+
+    GRAD_NORM_CLIP: 10
